@@ -7,6 +7,7 @@
 #include <fstream>
 #include <filesystem>
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -41,7 +42,6 @@ static const GLushort kTriangles[] = {
 
 
 static HWND GetWorkerW();
-static BOOL CALLBACK MyMonitorEnumProc(HMONITOR hMonitor, HDC hdcMonitor, LPRECT lprcMonitor, LPARAM dwData);
 static GLint buildProgram(const char* fsFilePath);
 static std::string readAllText(const char *filePath);
 static GLuint createShaderObjectFromFile(const char *filePath, GLenum shaderType);
@@ -52,6 +52,69 @@ static GLint createVbo(const GLfloat *vertices, size_t n);
 static GLint createIbo(const GLushort *triangles, size_t n);
 
 namespace fs = std::filesystem;
+
+
+class GlProg
+{
+public:
+	GlProg()
+		: _program{ 0 }
+		, _uTime{ 0 }
+		, _uMouse{ 0 }
+		, _uResolution{ 0 }
+		, _uFrameCount{ 0 }
+		, _uPositionOffset{ 0 }
+	{
+	}
+
+	GlProg(GLint program)
+		: _program(program)
+		, _uTime{ glGetUniformLocation(program, "u_time") }
+		, _uMouse{ glGetUniformLocation(program, "u_mouse") }
+		, _uResolution{ glGetUniformLocation(program, "u_resolution") }
+		, _uFrameCount{ glGetUniformLocation(program, "u_frameCount") }
+		, _uPositionOffset{ glGetUniformLocation(program, "u_positionOffset") }
+	{
+
+	}
+
+	GLint program() const
+	{
+		return _program;
+	}
+
+	GLint uTime() const
+	{
+		return _uTime;
+	}
+
+	GLint uMouse() const
+	{
+		return _uMouse;
+	}
+
+	GLint uResolution() const
+	{
+		return _uResolution;
+	}
+
+	GLint uFrameCount() const
+	{
+		return _uFrameCount;
+	}
+
+	GLint uPositionOffset() const
+	{
+		return _uPositionOffset;
+	}
+private:
+	GLint _program;
+	GLint _uTime;
+	GLint _uMouse;
+	GLint _uResolution;
+	GLint _uFrameCount;
+	GLint _uPositionOffset;
+};
 
 
 int main(int argc, char *argv[])
@@ -135,14 +198,21 @@ int main(int argc, char *argv[])
 		});
 
 		const char *targetDir = argc > 1 ? argv[1] : ".";
-		std::vector<std::pair<std::string, GLint>> pathProgPairs;
+		std::vector<std::pair<std::string, GlProg>> pathProgPairs;
 		for (const fs::directory_entry& entry : fs::recursive_directory_iterator(targetDir)) {
 			const auto& ext = entry.path().extension();
 			if (ext == ".glsl") {
-				pathProgPairs.emplace_back(std::make_pair(entry.path().string(), 0));
-				std::cout << entry.path() << std::endl;
+				pathProgPairs.emplace_back(std::make_pair(entry.path().string(), GlProg{}));
 			}
 		}
+		auto f4 = makeFinally([&] {
+			for (const auto& pair : pathProgPairs) {
+				auto program = pair.second.program();
+				if (program != 0) {
+					glDeleteProgram(program);
+				}
+			}
+		});
 
 		if (glewInit() != GLEW_OK) {
 			std::cerr << "glewInit() failed" << std::endl;
@@ -150,28 +220,20 @@ int main(int argc, char *argv[])
 		}
 
 		// call OpenGL APIs as desired ... 
-		auto program = buildProgram("tes.glsl");  // TODO
-		auto f4 = makeFinally([=] {
-			glDeleteProgram(program);
-		});
+		// for (auto&& pair : pathProgPairs) {
+		// 	std::cout << "Compile " << pair.first << "..." << std::endl;
+		// 	auto program = buildProgram(pair.first.c_str());  // TODO
+		// 	std::cout << "Compile " << pair.first << "... Done" << std::endl;
+		// 	pair.second = GlProg{ program };
 
-		std::cout << "Compile success" << std::endl;
-
-		auto uTime = glGetUniformLocation(program, "u_time");
-		auto uMouse = glGetUniformLocation(program, "u_mouse");
-		auto uResolution = glGetUniformLocation(program, "u_resolution");
-		auto uFrameCount = glGetUniformLocation(program, "u_frameCount");
-		auto uPositionOffset = glGetUniformLocation(program, "u_positionOffset");
-
-		// Bind VBO.
-		auto attribLocation = glGetAttribLocation(program, "position");
-		glBindBuffer(GL_ARRAY_BUFFER, createVbo(kVertices, sizeof(kVertices) / sizeof(kVertices[0])));
-		glEnableVertexAttribArray(attribLocation);
-		glVertexAttribPointer(attribLocation, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
-		// Bind IBO.
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, createIbo(kTriangles, sizeof(kTriangles) / sizeof(kTriangles[0])));
-
-		glUseProgram(program);
+		// 	// Bind VBO.
+		// 	auto attribLocation = glGetAttribLocation(program, "position");
+		// 	glBindBuffer(GL_ARRAY_BUFFER, createVbo(kVertices, sizeof(kVertices) / sizeof(kVertices[0])));
+		// 	glEnableVertexAttribArray(attribLocation);
+		// 	glVertexAttribPointer(attribLocation, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+		// 	// Bind IBO.
+		// 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, createIbo(kTriangles, sizeof(kTriangles) / sizeof(kTriangles[0])));
+		// }
 
 		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 
@@ -183,26 +245,106 @@ int main(int argc, char *argv[])
 			std::cout << "FINISH" << std::endl;
 		} };
 
+
+		std::vector<std::pair<RECT, int>> rectIndexPairs;
+		std::uniform_int_distribution<> dist(0, pathProgPairs.size() - 1);
+		std::mt19937 rnd{ std::random_device{}() };
+		for (const auto& rect : rects) {
+			while (!pathProgPairs.empty()) {
+				auto progIndex = dist(rnd);
+				try {
+					auto& pair = pathProgPairs[progIndex];
+					if (pair.second.program() == 0) {
+						std::cout << "Compile " << pair.first << "..." << std::endl;
+						auto program = buildProgram(pair.first.c_str());  // TODO
+						std::cout << "Compile " << pair.first << "... Done" << std::endl;
+						pair.second = GlProg{ program };
+
+						// Bind VBO.
+						auto attribLocation = glGetAttribLocation(program, "position");
+						glBindBuffer(GL_ARRAY_BUFFER, createVbo(kVertices, sizeof(kVertices) / sizeof(kVertices[0])));
+						glEnableVertexAttribArray(attribLocation);
+						glVertexAttribPointer(attribLocation, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+						// Bind IBO.
+						glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, createIbo(kTriangles, sizeof(kTriangles) / sizeof(kTriangles[0])));
+					}
+
+					rectIndexPairs.emplace_back(std::make_pair(rect, progIndex));
+					break;
+				} catch (std::exception& ex) {
+					std::cerr << ex.what() << std::endl;
+					pathProgPairs.erase(pathProgPairs.begin() + progIndex);
+					dist.param(std::uniform_int_distribution<>::param_type{0, (int)pathProgPairs.size() - 1});
+				}
+			}
+			if (pathProgPairs.empty()) {
+				return 5;  // No available program.
+			}
+		}
+
 		int frameCount = 0;
-		const auto start = std::chrono::high_resolution_clock::now();
+		auto start = std::chrono::high_resolution_clock::now();
 		while (isContinue) {
-			glClearColor(0.0f, 0.0f, 0.3, 0.0f);
+			glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
 			glClearDepth(1.0f);
 			glClearStencil(0);
 			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
-			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start).count();
-			for (const auto& r : rects) {
+			const auto end = std::chrono::high_resolution_clock::now();
+			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+			if (elapsed >= 10000) {
+				for (auto& riPair : rectIndexPairs) {
+					while (!pathProgPairs.empty()) {
+						auto progIndex = dist(rnd);
+						std::cout << progIndex << std::endl;
+						try {
+							auto& pair = pathProgPairs[progIndex];
+							if (pair.second.program() == 0) {  // Need compile
+								std::cout << "Compile " << pair.first << "..." << std::endl;
+								auto program = buildProgram(pair.first.c_str());  // TODO
+								std::cout << "Compile " << pair.first << "... Done" << std::endl;
+								pair.second = GlProg{ program };
+
+								// Bind VBO.
+								auto attribLocation = glGetAttribLocation(program, "position");
+								glBindBuffer(GL_ARRAY_BUFFER, createVbo(kVertices, sizeof(kVertices) / sizeof(kVertices[0])));
+								glEnableVertexAttribArray(attribLocation);
+								glVertexAttribPointer(attribLocation, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+								// Bind IBO.
+								glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, createIbo(kTriangles, sizeof(kTriangles) / sizeof(kTriangles[0])));
+							}
+
+							riPair.second = progIndex;
+							break;
+						}
+						catch (std::exception& ex) {
+							std::cerr << ex.what() << std::endl;
+							pathProgPairs.erase(pathProgPairs.begin() + progIndex);
+							dist.param(std::uniform_int_distribution<>::param_type{ 0, (int)pathProgPairs.size() - 1 });
+						}
+					}
+				}
+				if (pathProgPairs.empty()) {
+					return 6;  // No available program.
+				}
+
+				start = end;
+			}
+
+			for (const auto& riPair : rectIndexPairs) {
+				const auto& r = riPair.first;
 				auto width = std::abs(r.right - r.left);
 				auto height = std::abs(r.bottom - r.top);
 				glViewport(r.left, r.top, width, height);
 				// glClear(GL_COLOR_BUFFER_BIT);
 
-				glUniform1f(uTime, static_cast<float>(static_cast<double>(elapsed) / 1000.0L));
-				glUniform2f(uMouse, 0.0f, 0.0f);
-				glUniform2f(uResolution, static_cast<float>(width), static_cast<float>(height));
-				glUniform1f(uFrameCount, static_cast<float>(frameCount));
-				glUniform2f(uPositionOffset, static_cast<float>(r.left), static_cast<float>(r.top));
+				const auto& glProg = pathProgPairs[riPair.second].second;
+				glUseProgram(glProg.program());
+				glUniform1f(glProg.uTime(), static_cast<float>(static_cast<double>(elapsed) / 1000.0L));
+				glUniform2f(glProg.uMouse(), 0.0f, 0.0f);
+				glUniform2f(glProg.uResolution(), static_cast<float>(width), static_cast<float>(height));
+				glUniform1f(glProg.uFrameCount(), static_cast<float>(frameCount));
+				glUniform2f(glProg.uPositionOffset(), static_cast<float>(r.left), static_cast<float>(r.top));
 
 				glDrawElements(GL_TRIANGLES, sizeof(kTriangles) / sizeof(kTriangles[0]), GL_UNSIGNED_SHORT, nullptr);
 			}
@@ -246,31 +388,6 @@ static HWND GetWorkerW()
 }
 
 
-static BOOL CALLBACK MyMonitorEnumProc(HMONITOR hMonitor, HDC hdcMonitor, LPRECT lprcMonitor, LPARAM dwData)
-{
-    MONITORINFOEX monitorInfo;
- 
-    monitorInfo.cbSize = sizeof( monitorInfo );
-    GetMonitorInfo( hMonitor, &monitorInfo );
-
-	std::cout << "top = " << monitorInfo.rcMonitor.top
-		<< ", left = " << monitorInfo.rcMonitor.left
-		<< ", right = " << monitorInfo.rcMonitor.right
-		<< ", bottom = " << monitorInfo.rcMonitor.bottom
-		<< std::endl;
-
-	// std::cout << "top = " << monitorInfo.rcWork.top
-	// 	<< ", left = " << monitorInfo.rcWork.left
-	// 	<< ", right = " << monitorInfo.rcWork.right
-	// 	<< ", bottom = " << monitorInfo.rcWork.bottom
-	// 	<< std::endl;
-
-	((std::vector<RECT>*)dwData)->emplace_back(monitorInfo.rcMonitor);
-
-    return TRUE;
-}
-
-
 /*!
  * @brief Read all data in specified file.
  * @param [in] filePath  Target file path.
@@ -307,7 +424,7 @@ static GLuint createShaderObjectFromFile(const char *filePath, GLenum shaderType
  */
 static GLuint createShaderObjectFromText(const std::string& shaderSource, GLenum shaderType)
 {
-  return createShaderObjectFromText(shaderSource.c_str(), shaderSource.length(), shaderType);
+	return createShaderObjectFromText(shaderSource.c_str(), shaderSource.length(), shaderType);
 }
 
 
@@ -321,36 +438,36 @@ static GLuint createShaderObjectFromText(const std::string& shaderSource, GLenum
 static GLuint createShaderObjectFromText(const char *shaderSource, size_t sourceSize, GLenum shaderType)
 {
 
-  auto shaderObj = glCreateShader(shaderType);
-  if (shaderObj == 0) {
-    std::ostringstream oss;
-    oss << "Failed to create shader type=["
-        << shaderType
-        << "]";
-    throw std::runtime_error{oss.str()};
-  }
+	auto shaderObj = glCreateShader(shaderType);
+	if (shaderObj == 0) {
+		std::ostringstream oss;
+		oss << "Failed to create shader type=["
+			<< shaderType
+			<< "]";
+		throw std::runtime_error{ oss.str() };
+	}
 
-  auto sourceLength = static_cast<GLint>(sourceSize);
+	auto sourceLength = static_cast<GLint>(sourceSize);
 
-  glShaderSource(shaderObj, 1, &shaderSource, &sourceLength);
-  glCompileShader(shaderObj);
+	glShaderSource(shaderObj, 1, &shaderSource, &sourceLength);
+	glCompileShader(shaderObj);
 
-  GLint infoLogLength;
-  glGetShaderiv(shaderObj, GL_INFO_LOG_LENGTH, &infoLogLength);
-  std::string infoLog(static_cast<size_t>(infoLogLength), '\0');
+	GLint infoLogLength;
+	glGetShaderiv(shaderObj, GL_INFO_LOG_LENGTH, &infoLogLength);
+	std::string infoLog(static_cast<size_t>(infoLogLength), '\0');
 
-  GLint fsCompileResult;
-  glGetShaderiv(shaderObj, GL_COMPILE_STATUS, &fsCompileResult);
-  if (fsCompileResult == GL_FALSE) {
-    GLsizei logLength;
-    glGetShaderInfoLog(shaderObj, static_cast<GLsizei>(infoLog.length()), &logLength, const_cast<GLchar*>(infoLog.data()));
-    glDeleteShader(shaderObj);
-    throw std::runtime_error{infoLog};
-  } else if (!infoLog.empty()) {
-    std::cerr << infoLog << std::endl;
-  }
+	GLint fsCompileResult;
+	glGetShaderiv(shaderObj, GL_COMPILE_STATUS, &fsCompileResult);
+	if (fsCompileResult == GL_FALSE) {
+		GLsizei logLength;
+		glGetShaderInfoLog(shaderObj, static_cast<GLsizei>(infoLog.length()), &logLength, const_cast<GLchar*>(infoLog.data()));
+		glDeleteShader(shaderObj);
+		throw std::runtime_error{ infoLog };
+	} else if (!infoLog.empty()) {
+		std::cerr << infoLog << std::endl;
+	}
 
-  return shaderObj;
+	return shaderObj;
 }
 
 
