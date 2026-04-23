@@ -21,6 +21,7 @@
 #include <tchar.h>
 #include <GL/glew.h>
 #include "Finally.hpp"
+#include "UniqueResource.hpp"
 
 
 //! Vertex shader source for version 1.0
@@ -140,13 +141,86 @@ private:
 	GLint _uPositionOffset;
 };
 
-
-struct Monitor
+struct WindowDeleter
 {
-    RECT rc;
-    HWND hwnd;
-    HDC dc;
-    HGLRC rcGL;
+	void operator()(HWND hWnd) const noexcept
+	{
+		if (hWnd != nullptr)
+		{
+			::DestroyWindow(hWnd);
+		}
+	}
+};
+
+
+struct ReleaseDCDeleter
+{
+    ReleaseDCDeleter(HWND hWnd)
+		: hWnd_(hWnd)
+	{}
+
+    void operator()(HDC hdc) const noexcept
+	{
+		if (hdc != nullptr && hWnd_ != nullptr)
+		{
+			::ReleaseDC(hWnd_, hdc);
+		}
+    }
+
+private:
+    HWND hWnd_{};
+};
+
+
+struct GLContextDeleter
+{
+	void operator()(HGLRC ctx) const noexcept
+	{
+		if (ctx != nullptr) {
+			if (wglGetCurrentContext() == ctx) {
+				wglMakeCurrent(nullptr, nullptr);
+			}
+			wglDeleteContext(ctx);
+		}
+	}
+};
+
+
+class Monitor
+{
+public:
+	Monitor(HWND hWnd, RECT rect, HDC hDc, HGLRC hGlRc)
+		: hWnd_{ hWnd }
+		, rect_{ rect }
+		, hDc_{ hDc, ReleaseDCDeleter{hWnd} }
+		, hGlRc_{ hGlRc }
+	{}
+
+	HWND getWnd() const noexcept
+	{
+		return hWnd_.get();
+	}
+
+	RECT getRect() const noexcept
+	{
+		return rect_;
+	}
+
+	HDC getDC() const noexcept
+	{
+		return hDc_.get();
+	}
+
+	HGLRC getGlRc() const noexcept
+	{
+		return hGlRc_.get();
+	}
+
+private:
+    std::unique_ptr<std::remove_pointer_t<HWND>, WindowDeleter> hWnd_;
+    RECT rect_;
+    std::unique_ptr<std::remove_pointer_t<HDC>, ReleaseDCDeleter> hDc_;
+    std::unique_ptr<std::remove_pointer_t<HGLRC>, GLContextDeleter> hGlRc_;
 };
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -177,47 +251,14 @@ int main(int argc, char *argv[])
 {
 	try {
 		auto hWorkerW = GetWorkerW();
-		auto hDC = GetDCEx(hWorkerW, nullptr, 0x403);
+		auto hDC = ::GetDCEx(hWorkerW, nullptr, 0x403);
 		if (hDC == nullptr) {
 			std::cerr << "GetDCEx() failed" << std::endl;
 			return 1;
 		}
 		auto f1 = makeFinally([&] {
-			ReleaseDC(hWorkerW, hDC);
+			::ReleaseDC(hWorkerW, hDC);
 		});
-
-		// std::vector<RECT> rects;
-		// // RECT rect;
-		// // if (!GetWindowRect(hWorkerW, &rect)) {
-		// // 	std::cerr << "GetWindowRect failed" << std::endl;
-		// // }
-		// // rects.emplace_back(rect);
-		// if (!EnumDisplayMonitors(NULL, NULL, +[](HMONITOR hMonitor, HDC hdcMonitor, LPRECT lprcMonitor, LPARAM dwData) -> BOOL {
-		// 		MONITORINFOEX monitorInfo;
-		// 		monitorInfo.cbSize = sizeof(monitorInfo);
-		// 		GetMonitorInfo(hMonitor, &monitorInfo);
-		// 		((std::vector<RECT>*)dwData)->emplace_back(monitorInfo.rcMonitor);
-		// 		return TRUE;
-		// 	}, (LPARAM)&rects)) {
-		// 	std::cerr << "EnumDisplayMonitors() failed" << std::endl;
-		// 	return 2;
-		// }
-
-		std::vector<Monitor> mons;
-		auto ret = EnumDisplayMonitors(NULL, NULL, [](HMONITOR hMon, HDC, LPRECT, LPARAM p) -> BOOL {
-			std::vector<Monitor>* list = (std::vector<Monitor>*)p;
-			MONITORINFO mi = { sizeof(mi) };
-			if (!GetMonitorInfo(hMon, &mi)) {
-				return FALSE;
-			}
-			Monitor m = {};
-			m.rc = mi.rcMonitor;
-			list->push_back(m);
-			return TRUE;
-		}, (LPARAM)&mons);
-		if (!ret) {
-			return 1000;
-		}
 
 		PIXELFORMATDESCRIPTOR pfd = {
 			sizeof(PIXELFORMATDESCRIPTOR),
@@ -239,84 +280,115 @@ int main(int argc, char *argv[])
 			0,  // visiblemask
 			0   // damagemask
 		};
-		int pf = ChoosePixelFormat(hDC, &pfd);
+		int pf = ::ChoosePixelFormat(hDC, &pfd);
 		if (pf == 0) {
 			std::cerr << "ChoosePixelFormat() failed" << std::endl;
 			return 2;
 		}
 
-		// if (!SetPixelFormat(hDC, pf, &pfd)) {
-		// 	std::cerr << "SetPixelFormat() failed" << std::endl;
-		// 	return 3;
+
+
+		// std::vector<RECT> rects;
+		// // RECT rect;
+		// // if (!GetWindowRect(hWorkerW, &rect)) {
+		// // 	std::cerr << "GetWindowRect failed" << std::endl;
+		// // }
+		// // rects.emplace_back(rect);
+		// if (!EnumDisplayMonitors(NULL, NULL, +[](HMONITOR hMonitor, HDC hdcMonitor, LPRECT lprcMonitor, LPARAM dwData) -> BOOL {
+		// 		MONITORINFOEX monitorInfo;
+		// 		monitorInfo.cbSize = sizeof(monitorInfo);
+		// 		GetMonitorInfo(hMonitor, &monitorInfo);
+		// 		((std::vector<RECT>*)dwData)->emplace_back(monitorInfo.rcMonitor);
+		// 		return TRUE;
+		// 	}, (LPARAM)&rects)) {
+		// 	std::cerr << "EnumDisplayMonitors() failed" << std::endl;
+		// 	return 2;
 		// }
 
-		WNDCLASS wc = { 0 };
+		std::vector<MONITORINFO> monitorInfoList;
+		auto ret = ::EnumDisplayMonitors(NULL, NULL, [](HMONITOR hMon, HDC, LPRECT, LPARAM p) -> BOOL {
+			std::vector<Monitor>* list = (std::vector<Monitor>*)p;
+			MONITORINFO mi = { sizeof(mi) };
+			if (!::GetMonitorInfo(hMon, &mi)) {
+				return FALSE;
+			}
+			reinterpret_cast<std::vector<MONITORINFO>*>(p)->push_back(mi);
+			return TRUE;
+		}, (LPARAM)&monitorInfoList);
+		if (!ret) {
+			return 1000;
+		}
+
+
+		::WNDCLASS wc = { 0 };
 		wc.lpfnWndProc = WndProc;
 		wc.hInstance = nullptr;
 		wc.lpszClassName = _T("ShaderWallPaper");
-		if (RegisterClass(&wc) == 0) {
+		if (::RegisterClass(&wc) == 0) {
 			std::cerr << "RegisterClass() failed" << std::endl;
 			return 1001;
 		}
 
-		int index = 0;
-		for (auto& m : mons) {
-			int w = m.rc.right - m.rc.left;
-			int h = m.rc.bottom - m.rc.top;
 
-			m.hwnd = CreateWindowEx(
+		std::vector<Monitor> mons;
+		for (const auto& mi : monitorInfoList) {
+			const auto& rcMonitor = mi.rcMonitor;
+			auto w = rcMonitor.right - rcMonitor.left;
+			auto h = rcMonitor.bottom - rcMonitor.top;
+
+			auto hWnd = ::CreateWindowEx(
 				0,
 				_T("ShaderWallPaper"),
 				L"",
 				WS_CHILD | WS_VISIBLE,
-				m.rc.left,
-				m.rc.top,
+				rcMonitor.left,
+				rcMonitor.top,
 				w,
 				h,
 				hWorkerW,
 				0,
 				nullptr,
 				0);
-			if (m.hwnd == nullptr) {
-				std::cerr << "CreateWindowEx() failed: 0x" << std::hex << GetLastError() << std::endl;
+			if (hWnd == nullptr) {
+				std::cerr << "CreateWindowEx() failed: 0x" << std::hex << ::GetLastError() << std::endl;
 				return 100;
 			}
 
-			SetWindowLong(m.hwnd, GWL_EXSTYLE, GetWindowLong(m.hwnd, GWL_EXSTYLE) | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE);
+			::SetWindowLong(hWnd, GWL_EXSTYLE, ::GetWindowLong(hWnd, GWL_EXSTYLE) | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE);
 
-			m.dc = GetDC(m.hwnd);
-			if (m.dc == nullptr) {
+			auto hDc = ::GetDC(hWnd);
+			if (hDc == nullptr) {
 				std::cerr << "GetDC() failed" << std::endl;
-				std::printf("LastError = 0x%08x\n", GetLastError());
+				std::printf("LastError = 0x%08x\n", ::GetLastError());
 				return 2;
 			}
-			if (!SetPixelFormat(m.dc, pf, &pfd)) {
+			if (!SetPixelFormat(hDc, pf, &pfd)) {
 				std::cerr << "SetPixelFormat() failed" << std::endl;
 				return 3;
 			}
 
-			m.rcGL = wglCreateContext(m.dc);
-			if (m.rcGL == nullptr) {
+			auto hGlRc = wglCreateContext(hDc);
+			if (hGlRc == nullptr) {
 				std::cerr << "wglCreateContext() failed" << std::endl;
-				std::printf("LastError = 0x%08x\n", GetLastError());
+				std::printf("LastError = 0x%08x\n", ::GetLastError());
 				return 4;
 			}
 
-			if (index == 0) {
+			if (mons.empty()) {
 				// for glewInit().
-				if (!wglMakeCurrent(m.dc, m.rcGL)) {
+				if (!::wglMakeCurrent(hDc, hGlRc)) {
 					std::cerr << "wglMakeCurrent() failed" << std::endl;
-					std::printf("LastError = 0x%08x\n", GetLastError());
+					std::printf("LastError = 0x%08x\n", ::GetLastError());
 					return 5;
 				}
 			} else {
-				if (!wglShareLists(mons[0].rcGL, m.rcGL)) {
+				if (!::wglShareLists(mons[0].getGlRc(), hGlRc)) {
 					std::cerr << "wglShareLists() failed" << std::endl;
-					std::printf("LastError = 0x%08x\n", GetLastError());
+					std::printf("LastError = 0x%08x\n", ::GetLastError());
 				}
 			}
 
-			index++;
+			mons.emplace_back(hWnd, rcMonitor, hDc, hGlRc);
 		}
 
 		if (glewInit() != GLEW_OK) {
@@ -349,7 +421,7 @@ int main(int argc, char *argv[])
 		for (const fs::directory_entry& entry : fs::recursive_directory_iterator(targetDir)) {
 			const auto& ext = entry.path().extension();
 			if (ext == ".glsl") {
-				pathProgPairs.emplace_back(std::make_pair(entry.path().string(), GlProg{}));
+				pathProgPairs.push_back(std::make_pair(entry.path().string(), GlProg{}));
 			}
 		}
 		auto f4 = makeFinally([&] {
@@ -393,7 +465,7 @@ int main(int argc, char *argv[])
 		std::mt19937 rnd{ std::random_device{}() };
 
 		for (const auto& mon : mons) {
-			monitorIndexPairs.emplace_back(std::make_pair(mon, 0));
+			monitorIndexPairs.emplace_back(mon, 0);
 		}
 
 		setupVsync(true);
@@ -450,7 +522,7 @@ int main(int argc, char *argv[])
 
 			for (const auto& miPair : monitorIndexPairs) {
 				const auto& mon = miPair.first;
-				const auto& r = mon.rc;
+				const auto& r = mon.getRect();
 				auto width = std::abs(r.right - r.left);
 				auto height = std::abs(r.bottom - r.top);
 
@@ -462,7 +534,7 @@ int main(int argc, char *argv[])
 				// 	<< ", rcGL = " << mon. rcGL
 				// 	<< "\n";
 
-				if (!wglMakeCurrent(mon.dc, mon.rcGL))
+				if (!::wglMakeCurrent(mon.getDC(), mon.getGlRc()))
 				{
 					std::cerr << "wglMakeCurrent() failed" << std::endl;
 					std::fprintf(stderr, "LastError = 0x%08x\n", GetLastError());
@@ -494,7 +566,7 @@ int main(int argc, char *argv[])
 
 				glDrawElements(GL_TRIANGLES, sizeof(kTriangles) / sizeof(kTriangles[0]), GL_UNSIGNED_SHORT, nullptr);
 
-				if (!SwapBuffers(mon.dc)) {
+				if (!::SwapBuffers(mon.getDC())) {
 					std::cerr << "SwapBuffers() failed" << std::endl;
 				}
 			}
@@ -591,7 +663,6 @@ static GLuint createShaderObjectFromText(const std::string& shaderSource, GLenum
  */
 static GLuint createShaderObjectFromText(const char *shaderSource, size_t sourceSize, GLenum shaderType)
 {
-
 	auto shaderObj = glCreateShader(shaderType);
 	if (shaderObj == 0) {
 		std::ostringstream oss;
@@ -606,19 +677,23 @@ static GLuint createShaderObjectFromText(const char *shaderSource, size_t source
 	glShaderSource(shaderObj, 1, &shaderSource, &sourceLength);
 	glCompileShader(shaderObj);
 
-	GLint infoLogLength;
-	glGetShaderiv(shaderObj, GL_INFO_LOG_LENGTH, &infoLogLength);
-	std::string infoLog(static_cast<size_t>(infoLogLength), '\0');
-
 	GLint fsCompileResult;
 	glGetShaderiv(shaderObj, GL_COMPILE_STATUS, &fsCompileResult);
-	if (fsCompileResult == GL_FALSE) {
+
+	GLint infoLogLength;
+	glGetShaderiv(shaderObj, GL_INFO_LOG_LENGTH, &infoLogLength);
+
+	if (fsCompileResult == GL_FALSE || infoLogLength > 0) {
+		char smallLogBuf[1024 * 8];
+		std::unique_ptr<char[]> buf(infoLogLength >= sizeof(smallLogBuf) ? new char[infoLogLength] : nullptr);
+
 		GLsizei logLength;
-		glGetShaderInfoLog(shaderObj, static_cast<GLsizei>(infoLog.length()), &logLength, const_cast<GLchar*>(infoLog.data()));
+		glGetShaderInfoLog(shaderObj, static_cast<GLsizei>(infoLogLength), &logLength, buf.get());
 		glDeleteShader(shaderObj);
-		throw std::runtime_error{ infoLog };
-	} else if (!infoLog.empty()) {
-		std::cerr << infoLog << std::endl;
+		if (fsCompileResult == GL_FALSE) {
+			throw std::runtime_error{ buf.get() };
+		}
+		std::cerr << buf.get() << std::endl;
 	}
 
 	return shaderObj;
@@ -654,25 +729,31 @@ static GLint buildProgram(const char *fsFilePath)
  */
 static GLint linkShaders(GLuint vsObj, GLuint fsObj)
 {
-	static char infoLogBuf[1024 * 1024];
-
-	GLuint shader = glCreateProgram();
-	if (shader == 0) {
+	GLuint program = glCreateProgram();
+	if (program == 0) {
 		throw std::runtime_error{ "Failed to create program" };
 	}
 
-	glAttachShader(shader, vsObj);
-	glAttachShader(shader, fsObj);
-	glLinkProgram(shader);
+	glAttachShader(program, vsObj);
+	glAttachShader(program, fsObj);
+	glLinkProgram(program);
+
 	GLint linkResult;
-	glGetProgramiv(shader, GL_LINK_STATUS, &linkResult);
+	glGetProgramiv(program, GL_LINK_STATUS, &linkResult);
+
+	GLint infoLogLength;
+	glGetProgramiv(program, GL_INFO_LOG_LENGTH, &infoLogLength);
+
 	if (linkResult == GL_FALSE) {
+		char smallLogBuf[1024 * 8];
+		std::unique_ptr<char[]> buf(infoLogLength >= sizeof(smallLogBuf) ? new char[infoLogLength] : nullptr);
+
 		GLsizei logLength;
-		glGetProgramInfoLog(shader, static_cast<GLsizei>(sizeof(infoLogBuf)), &logLength, infoLogBuf);
-		throw std::runtime_error{ infoLogBuf };
+		glGetProgramInfoLog(program, infoLogLength, &logLength, buf.get());
+		throw std::runtime_error{ buf.get() };
 	}
 
-	return shader;
+	return program;
 }
 
 

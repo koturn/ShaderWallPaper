@@ -23,5 +23,8 @@
     <ClInclude Include="Finally.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UniqueResource.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
